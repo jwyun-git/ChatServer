@@ -1,130 +1,184 @@
-﻿#include <winsock2.h>
+﻿#include <WinSock2.h>
 #include <WS2tcpip.h>
-#include <windows.h>
-#include <stdlib.h>
-#include <stdio.h>
 
+#include <iostream>
+#include <string>
 
-#define DEFAULT_BUFLEN 512
-#define DEFAULT_PORT "27015"
+constexpr char DEFAULT_PORT[] = "27015";
+constexpr int BUFFER_SIZE = 1024;
 
 int main()
 {
-	WSADATA wsaData;
-	int iResult;
+    WSADATA wsaData;
+    int iResult;
 
-	SOCKET ListenSocket = INVALID_SOCKET;
-	SOCKET ClientSocket = INVALID_SOCKET;
+    // Winsock 초기화
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        std::cerr << "WSAStartup failed with error: "
+            << iResult << '\n';
+        return 1;
+    }
 
-	struct addrinfo* result = NULL;
-	struct addrinfo hints;
+    addrinfo hints{};
+    addrinfo* addressInfo = nullptr;
 
-	int iSendResult;
-	char recvbuf[DEFAULT_BUFLEN];
-	int recvbuflen = DEFAULT_BUFLEN;
+    // 서버 주소 정보 설정
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
 
-	// winsock 초기화
-	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-	if (iResult != 0) {
-		printf("WSAStartup failed with error: %d\n", iResult);
-		return 1;
-	}
+    iResult = getaddrinfo(
+        nullptr,
+        DEFAULT_PORT,
+        &hints,
+        &addressInfo
+    );
 
-	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
+    if (iResult != 0) {
+        std::cerr << "getaddrinfo failed with error: "
+            << iResult << '\n';
 
-	iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
-	if (iResult != 0) {
-		printf("getaddrinfo failed with error: %d\n", iResult);
-		WSACleanup();
-		return 1;
-	}
+        WSACleanup();
+        return 1;
+    }
 
-	// socket; 소켓 생성
-	ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-	if (ListenSocket == INVALID_SOCKET) {
-		printf("socket failed with error: %ld\n", WSAGetLastError());
-		freeaddrinfo(result);
-		WSACleanup();
-		return 1;
-	}
+    // 리슨 소켓 생성
+    SOCKET listenSocket = socket(
+        addressInfo->ai_family,
+        addressInfo->ai_socktype,
+        addressInfo->ai_protocol
+    );
 
-	// bind; TCP 수신 소켓 설정
-	iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
-	if (iResult == SOCKET_ERROR) {
-		printf("bind failed with error: %d\n", WSAGetLastError());
-		freeaddrinfo(result);
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
+    if (listenSocket == INVALID_SOCKET) {
+        std::cerr << "socket failed with error: "
+            << WSAGetLastError() << '\n';
 
-	freeaddrinfo(result);
+        freeaddrinfo(addressInfo);
+        WSACleanup();
+        return 1;
+    }
 
-	// listen
-	iResult = listen(ListenSocket, SOMAXCONN);
-	if (iResult == SOCKET_ERROR) {
-		printf("listen failed with error: %d\n", WSAGetLastError());
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
+    // 소켓에 주소와 포트 바인딩
+    iResult = bind(
+        listenSocket,
+        addressInfo->ai_addr,
+        static_cast<int>(addressInfo->ai_addrlen)
+    );
 
-	// accpet; 클라이언트 소켓 수락
-	ClientSocket = accept(ListenSocket, NULL, NULL);
-	if (ClientSocket == INVALID_SOCKET) {
-		printf("accept failed with error: %d\n", WSAGetLastError());
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
-	}
+    freeaddrinfo(addressInfo);
 
-	// 더 이상 서버 소켓이 필요없으므로 정리
-	closesocket(ListenSocket);
+    if (iResult == SOCKET_ERROR) {
+        std::cerr << "bind failed with error: "
+            << WSAGetLastError() << '\n';
 
+        closesocket(listenSocket);
+        WSACleanup();
+        return 1;
+    }
 
-	// 피어가 연결 종료할 때까지 수신
-	do {
-		iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
-		if (iResult > 0) {
-			printf("Bytes received: %d\n", iResult);
+    // 클라이언트 연결 요청 대기
+    iResult = listen(listenSocket, SOMAXCONN);
 
-			// 버퍼를 송신자에게 다시 에코
-			iSendResult = send(ClientSocket, recvbuf, iResult, 0);
-			if (iResult == SOCKET_ERROR) {
-				printf("send failed with error: %d\n", WSAGetLastError());
-				closesocket(ClientSocket);
-				WSACleanup();
-				return 1;
-			}
-			printf("Bytes send: %d\n", iSendResult);
-		}
-		else if (iResult == 0) {
-			printf("Connection closing...\n");
-		}
-		else {
-			printf("recv failed with error: %d\n", WSAGetLastError());
-			closesocket(ClientSocket);
-			WSACleanup();
-			return 1;
-		}
-	} while (iResult > 0);
+    if (iResult == SOCKET_ERROR) {
+        std::cerr << "listen failed with error: "
+            << WSAGetLastError() << '\n';
 
-	// 끝났으므로 연결종료
-	iResult = shutdown(ClientSocket, SD_SEND);
-	if (iResult == SOCKET_ERROR) {
-		printf("shutdown failed with error: %d\n", WSAGetLastError());
-		closesocket(ClientSocket);
-		WSACleanup();
-		return 1;
-	}
+        closesocket(listenSocket);
+        WSACleanup();
+        return 1;
+    }
 
-	// 정리
-	closesocket(ClientSocket);
-	WSACleanup();
+    std::cout << "Server is listening on port "
+        << DEFAULT_PORT << ".\n";
 
-	return 0;
+    // 클라이언트 연결 수락
+    SOCKET clientSocket = accept(
+        listenSocket,
+        nullptr,
+        nullptr
+    );
+
+    if (clientSocket == INVALID_SOCKET) {
+        std::cerr << "accept failed with error: "
+            << WSAGetLastError() << '\n';
+
+        closesocket(listenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    std::cout << "Client connected.\n";
+
+    // 현재는 클라이언트 한 명만 처리하므로 리슨 소켓 종료
+    closesocket(listenSocket);
+
+    char buffer[BUFFER_SIZE]{};
+
+    // 클라이언트가 연결을 종료할 때까지 데이터 수신
+    do {
+        iResult = recv(
+            clientSocket,
+            buffer,
+            sizeof(buffer),
+            0
+        );
+
+        if (iResult > 0) {
+            std::cout << "Received: "
+                << std::string(buffer, iResult)
+                << '\n';
+
+            // 수신한 데이터를 그대로 다시 전송
+            int iSendResult = send(
+                clientSocket,
+                buffer,
+                iResult,
+                0
+            );
+
+            if (iSendResult == SOCKET_ERROR) {
+                std::cerr << "send failed with error: "
+                    << WSAGetLastError() << '\n';
+
+                closesocket(clientSocket);
+                WSACleanup();
+                return 1;
+            }
+
+            std::cout << "Bytes sent: "
+                << iSendResult << '\n';
+        }
+        else if (iResult == 0) {
+            std::cout << "Connection closing...\n";
+        }
+        else {
+            std::cerr << "recv failed with error: "
+                << WSAGetLastError() << '\n';
+
+            closesocket(clientSocket);
+            WSACleanup();
+            return 1;
+        }
+
+    } while (iResult > 0);
+
+    // 송신 방향 연결 종료
+    iResult = shutdown(clientSocket, SD_SEND);
+
+    if (iResult == SOCKET_ERROR) {
+        std::cerr << "shutdown failed with error: "
+            << WSAGetLastError() << '\n';
+
+        closesocket(clientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // 소켓 및 Winsock 정리
+    closesocket(clientSocket);
+    WSACleanup();
+
+    return 0;
 }
