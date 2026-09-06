@@ -1,9 +1,14 @@
 ﻿#include <WinSock2.h>
 #include <WS2tcpip.h>
 
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
+
+#include "Packet.h"
 
 constexpr char DEFAULT_PORT[] = "27015";
 constexpr int BUFFER_SIZE = 1024;
@@ -97,6 +102,7 @@ int main()
    // 서버 메시지 수신 전용 스레드
     std::thread recvThread([connectSocket]() {
         char recvBuffer[BUFFER_SIZE]{};
+        std::vector<char> accumulatedBuffer;
 
         while (true) {
             int receivedBytes = recv(
@@ -107,10 +113,64 @@ int main()
             );
 
             if (receivedBytes > 0) {
-                std::cout << "Received: "
-                    << std::string(recvBuffer, receivedBytes)
-                    << '\n';
+                // 받은 데이터를 누적 버퍼에 추가
+                accumulatedBuffer.insert(
+                    accumulatedBuffer.end(),
+                    recvBuffer,
+                    recvBuffer + receivedBytes
+                );
+
+                while (true) {
+                    // 패킷 헤더에 다 들어오지 않은 경우
+                    if (accumulatedBuffer.size() < PACKET_HEADER_SIZE) {
+                        break;
+                    }
+
+                    std::uint32_t networkPayloadSize = 0;
+
+                    std::memcpy(
+                        &networkPayloadSize,
+                        accumulatedBuffer.data(),
+                        PACKET_HEADER_SIZE
+                    );
+
+                    std::uint32_t payloadSize =
+                        ntohl(networkPayloadSize);
+
+                    // 비정상적인 패킷 크기 검사
+                    if (payloadSize > MAX_PAYLOAD_SIZE) {
+                        std::cerr << "\nInvalid packet size: "
+                            << payloadSize << "\n";
+
+                        return;
+                    }
+
+                    std::size_t packetSize =
+                        PACKET_HEADER_SIZE + payloadSize;
+
+                    // payload가 아직 전부 도착하지 않은 경우
+                    if (accumulatedBuffer.size() < packetSize)
+                    {
+                        break;
+                    }
+
+                    const char* payload =
+                        accumulatedBuffer.data() + PACKET_HEADER_SIZE;
+
+                    std::cout << "\nReceived: "
+                        << std::string(
+                            payload,
+                            payloadSize
+                        ) << "\n";
+
+                    // 처리한 패킷을 누적 버퍼에서 제거
+                    accumulatedBuffer.erase(
+                        accumulatedBuffer.begin(),
+                        accumulatedBuffer.begin() + packetSize
+                    );
+                }
             }
+
             else if (receivedBytes == 0) {
                 std::cout << "Connection closed.\n";
                 break;
@@ -120,7 +180,7 @@ int main()
                 // 프로그램 종료과정에서 recv 해제된 경우
                 if (error != WSAESHUTDOWN) {
                     std::cerr << "recv failed with error: "
-                        << WSAGetLastError() << '\n';
+                        << error << '\n';
                 }
                 break;
             }
@@ -143,21 +203,62 @@ int main()
             continue;
         }
 
-        iResult = send(
-            connectSocket,
-            message.data(),
-            static_cast<int>(message.size()),
-            0
-        );
+        std::uint32_t payloadSize =
+            static_cast<std::uint32_t>(message.size());
 
-        if (iResult == SOCKET_ERROR) {
-            std::cerr << "send failed with error: "
-                << WSAGetLastError() << '\n';
-            break;
+        if (payloadSize > MAX_PAYLOAD_SIZE) {
+            std::cerr << "Message is too long.\n";
+            continue;
         }
 
+        // 패킷 헤더는 Network Byte Order로 저장
+        std::uint32_t networkPayloadSize =
+            htonl(payloadSize);
+        
+        // [4-byte Payload Size][Payload]
+        std::vector<char> packet(
+            PACKET_HEADER_SIZE + payloadSize
+        );
+
+        std::memcpy(
+            packet.data(),
+            &networkPayloadSize,
+            PACKET_HEADER_SIZE
+        );
+
+        std::memcpy(
+            packet.data() + PACKET_HEADER_SIZE,
+            message.data(),
+            payloadSize
+        );
+
+        // 패킷 전체가 전송될때까지 반복
+        int totalSentBytes = 0;
+        int packetSize = static_cast<int>(packet.size());
+
+        while (totalSentBytes < packetSize) {
+            iResult = send(
+                connectSocket,
+                packet.data() + totalSentBytes,
+                packetSize - totalSentBytes,
+                0
+            );
+
+            if (iResult == SOCKET_ERROR) {
+                std::cerr << "send failed with error: "
+                    << WSAGetLastError() << '\n';
+                break;
+            }
+
+            totalSentBytes += iResult;
+        }
+
+        if (iResult == SOCKET_ERROR) {
+            break;
+        }
+      
         std::cout << "Bytes sent: "
-            << iResult << '\n';
+            << totalSentBytes << '\n';
     }
     
 
@@ -175,6 +276,7 @@ int main()
 
     // 소켓 및 Winsock 정리
     closesocket(connectSocket);
+    connectSocket = INVALID_SOCKET;
     WSACleanup();
 
     return 0;

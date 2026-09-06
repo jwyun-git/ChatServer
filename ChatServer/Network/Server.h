@@ -4,6 +4,8 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <cstdint>
+#include <cstring>
 
 #include "Iocp.h"
 #include "IocpEvent.h"
@@ -39,7 +41,8 @@ private:
 
     void broadcast(
         const std::shared_ptr<Session>& sender,
-        DWORD bytesTransferred
+        const char* data,
+        std::uint32_t dataSize
     );
 
     void disconnectSession(

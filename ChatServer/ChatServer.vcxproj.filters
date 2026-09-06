@@ -8,16 +8,10 @@
     <ClCompile Include="Network\Iocp.cpp">
       <Filter>Network</Filter>
     </ClCompile>
-    <ClCompile Include="Network\Session.cpp">
-      <Filter>Network</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Network">
       <UniqueIdentifier>{dc906875-80c2-4aff-939b-2301062508ec}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Utils">
-      <UniqueIdentifier>{9cfda5d6-79a0-483e-b94a-7a1d8ce1620d}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -33,5 +27,6 @@
     <ClInclude Include="Network\Session.h">
       <Filter>Network</Filter>
     </ClInclude>
+    <ClInclude Include="..\Common\Packet.h" />
   </ItemGroup>
 </Project>

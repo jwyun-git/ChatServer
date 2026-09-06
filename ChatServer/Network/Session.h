@@ -4,6 +4,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "IocpEvent.h"
 
@@ -20,6 +21,8 @@ public:
 
 	bool isSending = false;
 	DWORD sendOffset = 0;
+
+	std::vector<char> recvBuffer;
 
 private:
 

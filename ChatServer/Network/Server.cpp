@@ -5,6 +5,7 @@
 
 #include "Server.h"
 #include "IocpEvent.h"
+#include "Packet.h"
 
 constexpr char DEFAULT_PORT[] = "27015";
 
@@ -245,10 +246,35 @@ bool Server::enqueueSend(Session* session, const char* data, DWORD dataSize)
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(session->sendMutex);
-    session->sendQueue.emplace_back(
+    if (dataSize > MAX_PAYLOAD_SIZE) {
+        return false;
+    }
+    
+    std::uint32_t payloadSize =
+        static_cast<std::uint32_t>(dataSize);
+
+    std::uint32_t networkPayloadSize =
+        htonl(payloadSize);
+
+    std::string packet(
+        PACKET_HEADER_SIZE + payloadSize, '\n'
+    );
+
+    std::memcpy(
+        packet.data(),
+        &networkPayloadSize,
+        PACKET_HEADER_SIZE
+    );
+
+    std::memcpy(
+        packet.data() + PACKET_HEADER_SIZE,
         data,
-        dataSize
+        payloadSize
+    );
+
+    std::lock_guard<std::mutex> lock(session->sendMutex);
+    session->sendQueue.push_back(
+       std::move(packet)
     );
 
     // 이미 진행중이면 Queue에만 추가
@@ -403,23 +429,76 @@ void Server::onIoCompleted(
             return;
         }
 
-        std::cout << "Received: "
-            << std::string(
-                targetSession->recvEvent.buffer,
-                bytesTransferred
-            )
-            << "\n";
-
-        broadcast(
-            targetSession,
-            bytesTransferred
+        // 수신한 데이터를 누적 버퍼에 추가
+        targetSession->recvBuffer.insert(
+            targetSession->recvBuffer.end(),
+            targetSession->recvEvent.buffer,
+            targetSession->recvEvent.buffer + bytesTransferred
         );
+
+        while (true) {
+            // 헤더 4바이트도 안들어온 경우
+            if (targetSession->recvBuffer.size() < PACKET_HEADER_SIZE) {
+                break;
+            }
+
+            std::uint32_t networkPayloadSize = 0;
+
+            std::memcpy(
+                &networkPayloadSize,
+                targetSession->recvBuffer.data(),
+                PACKET_HEADER_SIZE
+            );
+
+            std::uint32_t payloadSize =
+                ntohl(networkPayloadSize);
+
+            // 비정상적으로 큰 패킷 막음
+            if (payloadSize > MAX_PAYLOAD_SIZE) {
+                std::cerr << "Invalid packet size: "
+                    << payloadSize << "\n";
+                disconnectSession(targetSession);
+                return;
+            }
+
+            std::size_t packetSize =
+                PACKET_HEADER_SIZE + payloadSize;
+
+            // payload가 아직 전부 도착하지 않은 경우
+            if (targetSession->recvBuffer.size() < packetSize) {
+                break;
+            }
+
+            const char* payload =
+                targetSession->recvBuffer.data()
+                + PACKET_HEADER_SIZE;
+
+            std::cout << "Received: "
+                << std::string(
+                    targetSession->recvEvent.buffer,
+                    bytesTransferred
+                )
+                << "\n";
+
+            // 완성된 payload만 다른 클라이언트에 전달
+            broadcast(
+                targetSession,
+                payload,
+                payloadSize
+            );
+
+            // 처리한 패킷 제거
+            targetSession->recvBuffer.erase(
+                targetSession->recvBuffer.begin(),
+                targetSession->recvBuffer.begin() + packetSize
+            );
+        }
 
         if (!postRecv(targetSession.get())) {
             disconnectSession(targetSession);
         }
-
         return;
+
     }
 
     // 송신 완료
@@ -437,7 +516,11 @@ void Server::onIoCompleted(
     }
 }
 
-void Server::broadcast(const std::shared_ptr<Session>& sender, DWORD bytesTransferred)
+void Server::broadcast(
+    const std::shared_ptr<Session>& sender,
+    const char* data,
+    std::uint32_t dataSize
+)
 {
     std::vector<std::shared_ptr<Session>> recipients;
     
@@ -460,8 +543,8 @@ void Server::broadcast(const std::shared_ptr<Session>& sender, DWORD bytesTransf
     for (const auto& session : recipients) {
         if (!enqueueSend(
             session.get(),
-            sender->recvEvent.buffer,
-            bytesTransferred
+            data,
+            dataSize
         )) {
             disconnectSession(session);
         }
