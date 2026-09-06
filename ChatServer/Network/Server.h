@@ -17,9 +17,20 @@ public:
     void Shutdown();
 
 private:
-    bool postRecv(Session* session);    // WSARecv() 등록
-    bool postSend(Session* session, DWORD bytesTransferred);  // WSASend() 등록
-    void onIoCompleted( // Worker가 IO완료 시 처리
+    bool postRecv(Session* session);    // WSARecv()
+    bool enqueueSend(                   // 보낼 메시지를 Queue에 넣음
+        Session* session,
+        const char* data,
+        DWORD dataSize
+    );
+    bool postSend(Session* session);  // WSASend()
+
+    bool handleSendCompleted(         // 하나의 WSASend 완료 후 다음 송신 결정
+        Session* session,
+        DWORD bytesTransferred
+    );
+
+    void onIoCompleted(               // Worker가 IO완료 시 처리
         BOOL result,
         DWORD bytesTransferred,
         DWORD error,

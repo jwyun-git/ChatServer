@@ -237,15 +237,66 @@ bool Server::postRecv(Session* session)
     return true;
 }
 
-bool Server::postSend(
-    Session* session,
-    DWORD bytesTransferred
-)
+bool Server::enqueueSend(Session* session, const char* data, DWORD dataSize)
 {
+    if (session == nullptr ||
+        session->socket == INVALID_SOCKET ||
+        dataSize == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(session->sendMutex);
+    session->sendQueue.emplace_back(
+        data,
+        dataSize
+    );
+
+    // 이미 진행중이면 Queue에만 추가
+    if (session->isSending) {
+        return true;
+    }
+
+    session->isSending = true;
+    session->sendOffset = 0;
+
+    if (!postSend(session)) {
+        session->isSending = false;
+        session->sendQueue.clear();
+        session->sendOffset = 0;
+        
+        return false;
+    }
+
+    return true;
+}
+
+bool Server::postSend(Session* session)
+{
+    if (session->sendQueue.empty()) {
+        return false;
+    }
+
+    const std::string& message =
+        session->sendQueue.front();
+
+    DWORD remainingBytes =
+        static_cast<DWORD>(message.size()) - session->sendOffset;
+
+    if (remainingBytes > BUFFER_SIZE) {
+        std::cerr << "Send data exceeds buffer size.\n";
+        return false;
+    }
+
     session->sendEvent.overlapped = {};
 
+    std::memcpy(
+        session->sendEvent.buffer,
+        message.data() + session->sendOffset,
+        remainingBytes
+    );
+
     session->sendEvent.wsaBuf.buf = session->sendEvent.buffer;
-    session->sendEvent.wsaBuf.len = bytesTransferred;
+    session->sendEvent.wsaBuf.len = remainingBytes;
 
     DWORD sentBytes = 0;
 
@@ -270,6 +321,45 @@ bool Server::postSend(
     }
     
     return true;
+}
+
+bool Server::handleSendCompleted(Session* session, DWORD bytesTransferred)
+{
+    std::lock_guard<std::mutex> lock(session->sendMutex);
+
+    if (!session->isSending ||
+        session->sendQueue.empty()) {
+        return false;
+    }
+
+    if (bytesTransferred == 0) {
+        return false;
+    }
+
+    session->sendOffset += bytesTransferred;
+
+    const DWORD messageSize =
+        static_cast<DWORD>(
+            session->sendQueue.front().size()
+            );
+
+    // 일부만 전송된 경우 나머지 다시 전송
+    if (session->sendOffset < messageSize) {
+        return postSend(session);
+    }
+
+    // 현재 메시지 전송 완료
+    session->sendQueue.pop_front();
+    session->sendOffset = 0;
+
+    // 다음 메시지가 없다면 송신 종료
+    if (session->sendQueue.empty()) {
+        session->isSending = false;
+        return true;
+    }
+
+    // 다음 메시지 송신
+    return postSend(session);
 }
 
 void Server::onIoCompleted(
@@ -337,34 +427,43 @@ void Server::onIoCompleted(
         std::cout << "Bytes sent: "
             << bytesTransferred << "\n";
 
-        // Echo 송신 완료, 다음 수신 요청
-        if (!postRecv(targetSession.get())) {
+        if (!handleSendCompleted(
+            targetSession.get(),
+            bytesTransferred
+        )) {
             disconnectSession(targetSession);
         }
+        return;
     }
 }
 
 void Server::broadcast(const std::shared_ptr<Session>& sender, DWORD bytesTransferred)
 {
-    std::lock_guard<std::mutex> lock(sessionsMutex_);
+    std::vector<std::shared_ptr<Session>> recipients;
+    
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
 
-    for (const auto& session : sessions_) {
-        if (session == sender) {
-            continue;
+        for (const auto& session : sessions_) {
+            if (session == sender) {
+                continue;
+            }
+
+            if (session->socket == INVALID_SOCKET) {
+                continue;
+            }
+
+            recipients.push_back(session);
         }
+    }
 
-        if (session->socket == INVALID_SOCKET) {
-            continue;
-        }
-
-        std::memcpy(
-            session->sendEvent.buffer,
+    for (const auto& session : recipients) {
+        if (!enqueueSend(
+            session.get(),
             sender->recvEvent.buffer,
             bytesTransferred
-        );
-
-        if (!postSend(session.get(), bytesTransferred)) {
-            std::cerr << "Broadcast send failed.\n";
+        )) {
+            disconnectSession(session);
         }
     }
 }
