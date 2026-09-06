@@ -148,9 +148,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ChatServer.cpp" />
+    <ClCompile Include="Network\Iocp.cpp" />
     <ClCompile Include="Network\Server.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Network\Iocp.h" />
+    <ClInclude Include="Network\IocpEvent.h" />
     <ClInclude Include="Network\Server.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

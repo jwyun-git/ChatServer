@@ -5,6 +5,9 @@
     <ClCompile Include="Network\Server.cpp">
       <Filter>Network</Filter>
     </ClCompile>
+    <ClCompile Include="Network\Iocp.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Network">
@@ -16,6 +19,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Network\Server.h">
+      <Filter>Network</Filter>
+    </ClInclude>
+    <ClInclude Include="Network\Iocp.h">
+      <Filter>Network</Filter>
+    </ClInclude>
+    <ClInclude Include="Network\IocpEvent.h">
       <Filter>Network</Filter>
     </ClInclude>
   </ItemGroup>

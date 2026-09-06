@@ -1,10 +1,11 @@
-#include "Server.h"
 #include <WS2tcpip.h>
 #include <iostream>
 #include <string>
 
+#include "Server.h"
+#include "IocpEvent.h"
+
 constexpr char DEFAULT_PORT[] = "27015";
-constexpr int BUFFER_SIZE = 1024;
 
 bool Server::Initialize()
 {
@@ -18,6 +19,28 @@ bool Server::Initialize()
             << iResult << '\n';
         return false;
     }
+
+    // IOCP 초기화
+    if (!iocp_.Initialize()) {
+        WSACleanup();
+        return false;
+    }
+
+    iocp_.SetCompletionHandler(
+        [this](
+            BOOL result,
+            DWORD bytesTransferred,
+            DWORD error,
+            OVERLAPPED*  overlapped
+            ) {
+            onIoCompleted(
+                result,
+                bytesTransferred,
+                error,
+                overlapped
+            );
+        }
+    );
 
     addrinfo hints{};
     addrinfo* addressInfo = nullptr;
@@ -38,7 +61,8 @@ bool Server::Initialize()
     if (iResult != 0) {
         std::cerr << "getaddrinfo failed with error: "
             << iResult << '\n';
-
+        
+        iocp_.Shutdown();
         WSACleanup();
         return false;
     }
@@ -55,6 +79,7 @@ bool Server::Initialize()
             << WSAGetLastError() << '\n';
 
         freeaddrinfo(addressInfo);
+        iocp_.Shutdown();
         WSACleanup();
         return false;
     }
@@ -75,6 +100,8 @@ bool Server::Initialize()
 
         closesocket(listenSocket_);
         listenSocket_ = INVALID_SOCKET;
+
+        iocp_.Shutdown();
         WSACleanup();
         return false;
     }
@@ -89,7 +116,10 @@ bool Server::Initialize()
 
         closesocket(listenSocket_);
         listenSocket_ = INVALID_SOCKET;
+
+        iocp_.Shutdown();
         WSACleanup();
+
         return false;
     }
 
@@ -112,72 +142,35 @@ bool Server::Run()
         std::cerr << "accept failed with error: "
             << WSAGetLastError() << '\n';
 
-        closesocket(listenSocket_);
-        WSACleanup();
         return false;
     }
 
     std::cout << "Client connected.\n";
-    
-    char buffer[BUFFER_SIZE]{};
-    int iResult;
 
-    // 클라이언트가 연결을 종료할 때까지 데이터 수신
-    do {
-        iResult = recv(
-            clientSocket_,
-            buffer,
-            sizeof(buffer),
-            0
-        );
-
-        if (iResult > 0) {
-            std::cout << "Received: "
-                << std::string(buffer, iResult)
-                << '\n';
-
-            // 수신한 데이터를 그대로 다시 전송
-            int iSendResult = send(
-                clientSocket_,
-                buffer,
-                iResult,
-                0
-            );
-
-            // send 실패
-            if (iSendResult == SOCKET_ERROR) {
-                std::cerr << "send failed with error: "
-                    << WSAGetLastError() << '\n';
-                return false;
-            }
-
-            std::cout << "Bytes sent: "
-                << iSendResult << '\n';
-        }
-        else if (iResult == 0) {
-            std::cout << "Connection closing...\n";
-        }
-        // recv 실패
-        else {
-            std::cerr << "recv failed with error: "
-                << WSAGetLastError() << '\n';
-            return false;
-        }
-
-    } while (iResult > 0);
-
-    // 송신 방향 연결 종료
-    iResult = shutdown(clientSocket_, SD_SEND);
-
-    // shutdown 실패
-    if (iResult == SOCKET_ERROR) {
-        std::cerr << "shutdown failed with error: "
-            << WSAGetLastError() << '\n';
-
+    // 클라이언트 소켓을 IOCP에 등록
+    if (!iocp_.Register(clientSocket_, 0)) {
         return false;
     }
 
+    // 비동기 수신 요청
+    if (!postRecv()) {
+        return false;
+    }
+
+    // 클라이언트 연결 종료까지 대기
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        condition_.wait(
+            lock,
+            [this]() {
+                return disconnected_;
+            }
+        );
+    }
+
     return true;
+
 }
 
 void Server::Shutdown()
@@ -193,5 +186,145 @@ void Server::Shutdown()
         listenSocket_ = INVALID_SOCKET;
     }
 
+    iocp_.Shutdown();
+
     WSACleanup();
+}
+
+bool Server::postRecv()
+{
+    recvEvent_.overlapped = {};
+
+    recvEvent_.wsaBuf.buf = recvEvent_.buffer;
+    recvEvent_.wsaBuf.len = BUFFER_SIZE;
+
+    DWORD receivedBytes = 0;
+    DWORD flags = 0;
+
+    int iResult = WSARecv(
+        clientSocket_,
+        &recvEvent_.wsaBuf,
+        1,
+        &receivedBytes,
+        &flags,
+        &recvEvent_.overlapped,
+        nullptr
+    );
+
+    if (iResult == SOCKET_ERROR) {
+        int error = WSAGetLastError();
+        // WSA_IO_PENDING이 아닌 경우 실제 수신 오류
+        if (error != WSA_IO_PENDING) {
+            std::cerr << "WSARecv failed with error: "
+                << error << "\n";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool Server::postSend(DWORD bytesTransferred)
+{
+    sendEvent_.overlapped = {};
+    std::memcpy(
+        sendEvent_.buffer,
+        recvEvent_.buffer,
+        bytesTransferred
+    );
+
+    sendEvent_.wsaBuf.buf = sendEvent_.buffer;
+    sendEvent_.wsaBuf.len = bytesTransferred;
+
+    DWORD sentBytes = 0;
+
+    int iResult = WSASend(
+        clientSocket_,
+        &sendEvent_.wsaBuf,
+        1,
+        &sentBytes,
+        0,
+        &sendEvent_.overlapped,
+        nullptr
+    );
+
+    if (iResult == SOCKET_ERROR) {
+        int error = WSAGetLastError();
+        if (error != WSA_IO_PENDING) {
+            std::cerr << "WSASend failed with error: "
+                << error << "\n";
+
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+void Server::onIoCompleted(
+    BOOL result,
+    DWORD bytesTransferred,
+    DWORD error,
+    OVERLAPPED* overlapped
+)
+{
+    if (!result) {
+        std::cerr << "IO operation failed with error: "
+            << error << "\n";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            disconnected_ = true;
+        }
+
+        condition_.notify_one();
+        return;
+    }
+
+    // 수신 완료
+    if (overlapped == &recvEvent_.overlapped) {
+        
+        // 정상적인 연결 종료
+        if (bytesTransferred == 0) {
+            std::cout << "Connection closing...\n";
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                disconnected_ = true;
+            }
+            condition_.notify_one();
+            return;
+        }
+
+        std::cout << "Received: "
+            << std::string(
+                recvEvent_.buffer,
+                bytesTransferred
+            )
+            << "\n";
+
+        // 받은 데이터를 비동기로 다시 전송
+        if (!postSend(bytesTransferred)) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                disconnected_ = true;
+            }
+            condition_.notify_one();
+        }
+
+        return;
+    }
+
+    // 송신 완료
+    if (overlapped == &sendEvent_.overlapped) {
+        std::cout << "Bytes sent: "
+            << bytesTransferred << "\n";
+
+        // Echo 송신 완료, 다음 수신 요청
+        if (!postRecv()) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                disconnected_ = true;
+            }
+            condition_.notify_one();
+        }
+    }
 }
