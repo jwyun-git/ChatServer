@@ -243,11 +243,6 @@ bool Server::postSend(
 )
 {
     session->sendEvent.overlapped = {};
-    std::memcpy(
-        session->sendEvent.buffer,
-        session->recvEvent.buffer,
-        bytesTransferred
-    );
 
     session->sendEvent.wsaBuf.buf = session->sendEvent.buffer;
     session->sendEvent.wsaBuf.len = bytesTransferred;
@@ -325,11 +320,12 @@ void Server::onIoCompleted(
             )
             << "\n";
 
-        // 받은 데이터를 비동기로 다시 전송
-        if (!postSend(
-            targetSession.get(),
+        broadcast(
+            targetSession,
             bytesTransferred
-        )) {
+        );
+
+        if (!postRecv(targetSession.get())) {
             disconnectSession(targetSession);
         }
 
@@ -344,6 +340,31 @@ void Server::onIoCompleted(
         // Echo 송신 완료, 다음 수신 요청
         if (!postRecv(targetSession.get())) {
             disconnectSession(targetSession);
+        }
+    }
+}
+
+void Server::broadcast(const std::shared_ptr<Session>& sender, DWORD bytesTransferred)
+{
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
+
+    for (const auto& session : sessions_) {
+        if (session == sender) {
+            continue;
+        }
+
+        if (session->socket == INVALID_SOCKET) {
+            continue;
+        }
+
+        std::memcpy(
+            session->sendEvent.buffer,
+            sender->recvEvent.buffer,
+            bytesTransferred
+        );
+
+        if (!postSend(session.get(), bytesTransferred)) {
+            std::cerr << "Broadcast send failed.\n";
         }
     }
 }

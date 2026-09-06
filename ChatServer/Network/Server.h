@@ -26,6 +26,11 @@ private:
         OVERLAPPED* overlapped
     );
 
+    void broadcast(
+        const std::shared_ptr<Session>& sender,
+        DWORD bytesTransferred
+    );
+
     void disconnectSession(
         const std::shared_ptr<Session>& session
     );

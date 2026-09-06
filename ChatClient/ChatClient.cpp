@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <string>
+#include <thread>
 
 constexpr char DEFAULT_PORT[] = "27015";
 constexpr int BUFFER_SIZE = 1024;
@@ -16,7 +17,6 @@ int main()
     addrinfo* ptr = nullptr;
     addrinfo hints{};
 
-    char recvBuffer[BUFFER_SIZE]{};
     int iResult;
 
     // Winsock 초기화
@@ -94,9 +94,42 @@ int main()
     std::cout << "Connected to server.\n";
     std::cout << "Type 'quit' to exit.\n";
 
+   // 서버 메시지 수신 전용 스레드
+    std::thread recvThread([connectSocket]() {
+        char recvBuffer[BUFFER_SIZE]{};
+
+        while (true) {
+            int receivedBytes = recv(
+                connectSocket,
+                recvBuffer,
+                BUFFER_SIZE,
+                0
+            );
+
+            if (receivedBytes > 0) {
+                std::cout << "Received: "
+                    << std::string(recvBuffer, receivedBytes)
+                    << '\n';
+            }
+            else if (receivedBytes == 0) {
+                std::cout << "Connection closed.\n";
+                break;
+            }
+            else {
+                int error = WSAGetLastError();
+                // 프로그램 종료과정에서 recv 해제된 경우
+                if (error != WSAESHUTDOWN) {
+                    std::cerr << "recv failed with error: "
+                        << WSAGetLastError() << '\n';
+                }
+                break;
+            }
+        }
+    });
+
     std::string message;
 
-    // 사용자 메시지 입력 및 송수신
+    // 사용자 메시지 입력 및 송신
     while (true) {
         std::cout << "> ";
 
@@ -110,7 +143,6 @@ int main()
             continue;
         }
 
-        // 서버에 메시지 전송
         iResult = send(
             connectSocket,
             message.data(),
@@ -126,41 +158,19 @@ int main()
 
         std::cout << "Bytes sent: "
             << iResult << '\n';
-
-        // 서버가 에코한 메시지 수신
-        iResult = recv(
-            connectSocket,
-            recvBuffer,
-            BUFFER_SIZE,
-            0
-        );
-
-        if (iResult > 0) {
-            std::cout << "Received: "
-                << std::string(recvBuffer, iResult)
-                << '\n';
-        }
-        else if (iResult == 0) {
-            std::cout << "Connection closed.\n";
-            break;
-        }
-        else {
-            std::cerr << "recv failed with error: "
-                << WSAGetLastError() << '\n';
-            break;
-        }
     }
+    
 
-    // 더 이상 데이터를 보내지 않음을 서버에 알림
-    iResult = shutdown(connectSocket, SD_SEND);
+    // 송수신을 종료해 recv() 대기 중인 스레드를 깨움
+    iResult = shutdown(connectSocket, SD_BOTH);
 
     if (iResult == SOCKET_ERROR) {
         std::cerr << "shutdown failed with error: "
             << WSAGetLastError() << '\n';
+    }
 
-        closesocket(connectSocket);
-        WSACleanup();
-        return 1;
+    if (recvThread.joinable()) {
+        recvThread.join();
     }
 
     // 소켓 및 Winsock 정리
