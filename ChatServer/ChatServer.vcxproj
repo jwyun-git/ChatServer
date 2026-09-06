@@ -150,11 +150,13 @@
     <ClCompile Include="ChatServer.cpp" />
     <ClCompile Include="Network\Iocp.cpp" />
     <ClCompile Include="Network\Server.cpp" />
+    <ClCompile Include="Network\Session.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Network\Iocp.h" />
     <ClInclude Include="Network\IocpEvent.h" />
     <ClInclude Include="Network\Server.h" />
+    <ClInclude Include="Network\Session.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
